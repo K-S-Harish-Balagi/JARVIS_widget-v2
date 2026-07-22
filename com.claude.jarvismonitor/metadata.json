@@ -1,0 +1,15 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            { "Name": "ksharish" }
+        ],
+        "Category": "System Information",
+        "Description": "HUD-style system monitor: CPU, RAM, Swap, Disk, GPU, Network",
+        "Icon": "utilities-system-monitor",
+        "Id": "com.claude.jarvismonitor",
+        "Name": "Jarvis Monitor",
+        "Version": "1.0"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}
