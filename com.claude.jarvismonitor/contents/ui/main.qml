@@ -1,8 +1,10 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQml.Models
 
 import org.kde.plasma.core as PlasmaCore
 import org.kde.plasma.plasmoid
+import org.kde.plasma.plasma5support as P5Support
 
 import org.kde.ksysguard.sensors as Sensors
 
@@ -26,30 +28,7 @@ PlasmoidItem {
     Sensors.Sensor { id: diskSensor; sensorId: "disk/all/usedPercent" }
     Sensors.Sensor { id: diskUsed; sensorId: "disk/all/used" }
     Sensors.Sensor { id: diskTotal; sensorId: "disk/all/total" }
-    Sensors.Sensor { id: diskSystemPercent; sensorId: "disk/d665092e-06be-45a7-949b-97d2bad080b9/usedPercent" }
-    Sensors.Sensor { id: diskSystemUsed; sensorId: "disk/d665092e-06be-45a7-949b-97d2bad080b9/used" }
-    Sensors.Sensor { id: diskSystemTotal; sensorId: "disk/d665092e-06be-45a7-949b-97d2bad080b9/total" }
-    Sensors.Sensor { id: diskDataPercent; sensorId: "disk/06747f57747f4887/usedPercent" }
-    Sensors.Sensor { id: diskDataUsed; sensorId: "disk/06747f57747f4887/used" }
-    Sensors.Sensor { id: diskDataTotal; sensorId: "disk/06747f57747f4887/total" }
 
-    // DATA is a secondary HDD that mounts a few seconds after plasmashell starts,
-    // so the sensor doesn't exist yet when these bindings are first created.
-    // Re-set sensorId to force a fresh subscribe until ksystemstats picks it up.
-    Timer {
-        interval: 4000
-        repeat: true
-        running: diskDataPercent.status !== Sensors.Sensor.Ready
-        onTriggered: {
-            const id = "disk/06747f57747f4887"
-            diskDataPercent.sensorId = ""
-            diskDataUsed.sensorId = ""
-            diskDataTotal.sensorId = ""
-            diskDataPercent.sensorId = id + "/usedPercent"
-            diskDataUsed.sensorId = id + "/used"
-            diskDataTotal.sensorId = id + "/total"
-        }
-    }
     Sensors.Sensor { id: gpuSensor; sensorId: "gpu/all/usage" }
     Sensors.Sensor { id: gpuVramUsed; sensorId: "gpu/all/usedVram" }
     Sensors.Sensor { id: gpuVramTotal; sensorId: "gpu/all/totalVram" }
@@ -58,8 +37,8 @@ PlasmoidItem {
     Sensors.Sensor { id: batterySensor; sensorId: "power/battery_BAT0/chargePercentage" }
     Sensors.Sensor { id: batteryChargeRateSensor; sensorId: "power/battery_BAT0/chargeRate" }
 
-    // Same startup race as DATA disk above: if ksystemstats' battery source isn't
-    // ready yet when this binding is first created, it never resolves. Force a
+    // Startup race: if ksystemstats' battery source isn't ready yet when this
+    // binding is first created, it never resolves on its own. Force a
     // resubscribe until it reports Ready.
     Timer {
         interval: 4000
@@ -71,6 +50,121 @@ PlasmoidItem {
             batterySensor.sensorId = "power/battery_BAT0/chargePercentage"
             batteryChargeRateSensor.sensorId = "power/battery_BAT0/chargeRate"
         }
+    }
+
+    // Storage volumes are discovered at runtime rather than hardcoded by UUID, so
+    // a drive that appears later — a slow-mounting HDD, a USB stick, an SD card —
+    // shows up on its own. SensorTreeModel is the same model the System Monitor
+    // app's sensor browser uses; its "Disks" branch holds one node per mounted
+    // filesystem alongside the raw physical devices, which rescanDisks() separates.
+    property var diskList: []
+
+    // Bumped on every rescan. A Sensor whose volume has been unmounted keeps
+    // reporting Ready with its last value forever, so the only way to tell a
+    // dead volume from a live one is to make each bar re-subscribe and see
+    // whether it comes back (see the delegate's live-latch below).
+    property int probeTick: 0
+
+    // Cleanly ejecting a drive makes ksystemstats drop its sensor, but pulling
+    // one out while still mounted does not: the sensor lingers and keeps serving
+    // its last reading, so re-subscribing still reports Ready and the bar would
+    // never disappear. The kernel's own mount table is the only reliable answer,
+    // so cross-check every volume against it. Lowercased because sensor ids are
+    // lowercase while findmnt prints NTFS/FAT UUIDs in caps.
+    property var mountedUuids: []
+
+    P5Support.DataSource {
+        id: mountProbe
+        engine: "executable"
+        connectedSources: []
+
+        onNewData: function(source, data) {
+            disconnectSource(source)
+            const lines = String(data["stdout"] || "").split("\n")
+            let seen = []
+            for (const line of lines) {
+                const uuid = line.trim().toLowerCase()
+                if (uuid.length > 0) seen.push(uuid)
+            }
+            root.mountedUuids = seen
+        }
+
+        function refresh() {
+            // Skip if the previous run hasn't reported back yet.
+            if (connectedSources.length === 0) connectSource("findmnt -rno UUID")
+        }
+    }
+
+    Sensors.SensorTreeModel { id: sensorTree }
+    DelegateModel { id: treeWalker; model: sensorTree; delegate: Item {} }
+
+    function rescanDisks() {
+        treeWalker.rootIndex = sensorTree.index(-1, -1)
+
+        let disksIdx = null
+        for (let i = 0; i < treeWalker.count; i++) {
+            const idx = treeWalker.modelIndex(i)
+            if (String(sensorTree.data(idx, Qt.DisplayRole)) === "Disks") {
+                disksIdx = idx
+                break
+            }
+        }
+        if (!disksIdx) return
+
+        // Snapshot the child indices first: descending into a node to read its
+        // leaves moves rootIndex, which invalidates treeWalker's current level.
+        treeWalker.rootIndex = disksIdx
+        let nodes = []
+        for (let j = 0; j < treeWalker.count; j++) {
+            const idx = treeWalker.modelIndex(j)
+            nodes.push({ idx: idx, name: String(sensorTree.data(idx, Qt.DisplayRole)) })
+        }
+
+        let found = []
+        for (const node of nodes) {
+            treeWalker.rootIndex = node.idx
+            let prefix = ""
+            for (let m = 0; m < treeWalker.count; m++) {
+                const sid = String(sensorTree.data(treeWalker.modelIndex(m),
+                                                   Sensors.SensorTreeModel.SensorId))
+                if (sid.endsWith("/usedPercent")) {
+                    prefix = sid.slice(0, -"/usedPercent".length)
+                }
+            }
+            // Physical devices (sda, nvme0n1) expose no usedPercent at all;
+            // "disk/all" is the aggregate the DISK gauge already shows; and
+            // "[Group] Disk" is a regex placeholder node, not a real sensor.
+            if (!prefix || prefix === "disk/all") continue
+            if (!/^disk\/[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(prefix)) continue
+            found.push({ id: prefix, name: node.name })
+        }
+        root.diskList = found
+        root.probeTick++
+        mountProbe.refresh()
+    }
+
+    // The tree gains a node as soon as a volume mounts, but keeps stale ones
+    // after unmount, so each bar independently checks that its sensor is live.
+    Timer {
+        id: rescanDebounce
+        interval: 700
+        onTriggered: root.rescanDisks()
+    }
+
+    Connections {
+        target: sensorTree
+        function onRowsInserted() { rescanDebounce.restart() }
+        function onRowsRemoved() { rescanDebounce.restart() }
+        function onModelReset() { rescanDebounce.restart() }
+    }
+
+    // Safety net in case a mount lands without the tree signalling a row change.
+    Timer {
+        interval: 15000
+        repeat: true
+        running: true
+        triggeredOnStart: true
+        onTriggered: root.rescanDisks()
     }
 
     function shortValue(sensor) {
@@ -338,20 +432,78 @@ PlasmoidItem {
                     font.letterSpacing: 3
                 }
 
-                DiskBar {
-                    Layout.fillWidth: true
-                    label: "SYSTEM"
-                    barColor: "#5e96c7"
-                    percent: diskSystemPercent.value || 0
-                    detail: shortValue(diskSystemUsed) + " / " + shortValue(diskSystemTotal)
-                }
+                Repeater {
+                    model: root.diskList
 
-                DiskBar {
-                    Layout.fillWidth: true
-                    label: "DATA"
-                    barColor: "#4bbed6"
-                    percent: diskDataPercent.value || 0
-                    detail: shortValue(diskDataUsed) + " / " + shortValue(diskDataTotal)
+                    delegate: DiskBar {
+                        id: volume
+                        required property int index
+                        required property var modelData
+
+                        readonly property var barPalette: ["#5e96c7", "#4bbed6", "#75aeda",
+                                                           "#8ea3c0", "#43b4e8"]
+
+                        Sensors.Sensor { id: volPercent; sensorId: volume.modelData.id + "/usedPercent" }
+                        Sensors.Sensor { id: volUsed; sensorId: volume.modelData.id + "/used" }
+                        Sensors.Sensor { id: volTotal; sensorId: volume.modelData.id + "/total" }
+                        // The tree node's display name is still the raw sensor id
+                        // in the instant after a volume mounts, so take the label
+                        // from this sensor, which resolves to the volume label.
+                        Sensors.Sensor { id: volName; sensorId: volume.modelData.id + "/name" }
+
+                        // Re-subscribing is what actually tests whether the volume
+                        // is still mounted: a live one returns to Ready almost at
+                        // once, a dead one stays stuck at Loading.
+                        function resubscribe() {
+                            const base = volume.modelData.id
+                            volPercent.sensorId = ""
+                            volUsed.sensorId = ""
+                            volTotal.sensorId = ""
+                            volName.sensorId = ""
+                            volPercent.sensorId = base + "/usedPercent"
+                            volUsed.sensorId = base + "/used"
+                            volTotal.sensorId = base + "/total"
+                            volName.sensorId = base + "/name"
+                        }
+
+                        Connections {
+                            target: root
+                            function onProbeTickChanged() { volume.resubscribe() }
+                        }
+
+                        // Latch rather than binding straight to status, so the
+                        // brief Loading dip after each re-subscribe doesn't make
+                        // a healthy drive flicker out of the list.
+                        property bool live: false
+                        readonly property bool ready: volPercent.status === Sensors.Sensor.Ready
+                        onReadyChanged: {
+                            if (ready) {
+                                live = true
+                                deadTimer.stop()
+                            } else {
+                                deadTimer.restart()
+                            }
+                        }
+                        Timer {
+                            id: deadTimer
+                            interval: 4000
+                            onTriggered: volume.live = false
+                        }
+
+                        readonly property string uuid: String(volume.modelData.id).replace("disk/", "")
+                        // Empty means the first mount probe hasn't returned yet;
+                        // don't blank the panel out while waiting for it.
+                        readonly property bool mounted: root.mountedUuids.length === 0
+                                                        || root.mountedUuids.indexOf(uuid) >= 0
+
+                        Layout.fillWidth: true
+                        visible: volume.live && volume.mounted
+                                 && (volTotal.value || 0) >= Plasmoid.configuration.minDiskSizeGiB * 1073741824
+                        label: String(volName.value || volume.modelData.name).toUpperCase()
+                        barColor: barPalette[volume.index % barPalette.length]
+                        percent: volPercent.value || 0
+                        detail: shortValue(volUsed) + " / " + shortValue(volTotal)
+                    }
                 }
             }
         }

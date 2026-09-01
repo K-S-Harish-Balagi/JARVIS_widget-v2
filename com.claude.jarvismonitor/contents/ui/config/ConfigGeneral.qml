@@ -14,6 +14,7 @@ KCM.SimpleKCM {
     property alias cfg_showGpu: showGpuCheck.checked
     property alias cfg_showNetwork: showNetworkCheck.checked
     property alias cfg_showEffects: showEffectsCheck.checked
+    property alias cfg_minDiskSizeGiB: minDiskSizeSpin.value
     property color cfg_accentColor
 
     ColorDialog {
@@ -79,6 +80,13 @@ KCM.SimpleKCM {
         QQC2.CheckBox {
             id: showNetworkCheck
             text: i18n("Network throughput")
+        }
+
+        QQC2.SpinBox {
+            id: minDiskSizeSpin
+            Kirigami.FormData.label: i18n("Hide drives under (GiB):")
+            from: 0
+            to: 10000
         }
     }
 }

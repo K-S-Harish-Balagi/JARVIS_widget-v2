@@ -17,6 +17,10 @@ ColumnLayout {
     RowLayout {
         Layout.fillWidth: true
         Text {
+            // Discovered volume names can be long ("238.3 GiB Removable Media"),
+            // so the label takes the slack and elides instead of overflowing.
+            Layout.fillWidth: true
+            elide: Text.ElideRight
             text: diskBar.label
             color: "#c7d3da"
             font.family: "JetBrains Mono"
@@ -24,7 +28,6 @@ ColumnLayout {
             font.bold: true
             font.letterSpacing: 1
         }
-        Item { Layout.fillWidth: true }
         Text {
             text: Math.round(diskBar.percent) + "%"
             color: diskBar.barColor
@@ -49,6 +52,8 @@ ColumnLayout {
     }
 
     Text {
+        Layout.fillWidth: true
+        elide: Text.ElideRight
         text: diskBar.detail
         color: "#8b99a6"
         font.family: "JetBrains Mono"

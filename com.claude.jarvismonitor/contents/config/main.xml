@@ -25,5 +25,10 @@
     <entry name="showEffects" type="Bool">
       <default>true</default>
     </entry>
+    <entry name="minDiskSizeGiB" type="Int">
+      <default>10</default>
+      <min>0</min>
+      <max>10000</max>
+    </entry>
   </group>
 </kcfg>
