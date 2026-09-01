@@ -16,7 +16,10 @@ Item {
     property bool showDetail: true
 
     implicitWidth: 128
-    implicitHeight: 114
+    // ringSize(100) + topMargin(6) + labelText(~13) + topMargin(2) + detail text(~13),
+    // with a few px to spare. The old value (114) undercounted this by ~20px, so
+    // whatever came after a gauge in a layout overlapped its detail text.
+    implicitHeight: showDetail ? 136 : 76
 
     Behavior on value {
         NumberAnimation { duration: 500; easing.type: Easing.OutCubic }
@@ -103,7 +106,7 @@ Item {
         visible: gauge.showDetail && gauge.detail.length > 0
         color: "#8b99a6"
         font.family: "JetBrains Mono"
-        font.pixelSize: 9
+        font.pixelSize: 8
         font.bold: true
         elide: Text.ElideRight
     }

@@ -14,8 +14,16 @@ PlasmoidItem {
     preferredRepresentation: fullRepresentation
     Plasmoid.title: "Jarvis Monitor"
 
-    readonly property int hudMinWidth: 800
-    readonly property int hudMinHeight: 330
+    // 486 (wider of the two ring rows) + 36 margins + 40 inter-column spacing +
+    // 1 divider + 170 STORAGE = 733, rounded up slightly. This value alone was
+    // never the problem, though - Plasma's desktop containment persists an
+    // explicit pixel geometry per widget (~/.config/plasma-org.kde.plasma.desktop-
+    // appletsrc, ItemGeometries-<res>=Applet-<id>:x,y,w,h) that only grows to
+    // meet a larger minimum and never auto-shrinks to match a smaller one - every
+    // width cut this session below the stored value was silently a no-op until
+    // that stored geometry got updated directly to match.
+    readonly property int hudMinWidth: 735
+    readonly property int hudMinHeight: 350
     Layout.minimumWidth: hudMinWidth
     Layout.minimumHeight: hudMinHeight
 
@@ -167,12 +175,33 @@ PlasmoidItem {
         onTriggered: root.rescanDisks()
     }
 
+    // Compact "7.2G" style instead of ksysguard's own "7.2 GiB" formattedValue -
+    // freeing up real horizontal room in each gauge's detail text (measured: the
+    // longest realistic string drops from ~114px to ~72px at the same font size),
+    // which is what actually let the ring boxes shrink without eliding.
+    function compactBytes(bytes) {
+        if (bytes === undefined || bytes === null || isNaN(bytes)) return "—"
+        const units = ["B", "K", "M", "G", "T"]
+        let v = bytes, i = 0
+        while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+        return v.toFixed(1) + units[i]
+    }
+
     function shortValue(sensor) {
-        return sensor.formattedValue || "—"
+        return compactBytes(sensor.value)
+    }
+
+    // Capacity metrics (RAM/ZRAM/SWAP/DISK) shift toward amber then red as they
+    // fill up, so a problem is visible without reading the number. Deliberately
+    // NOT applied to CPU cores or GPU - pegging those at 100% is normal, not bad.
+    function severityColor(value, normalColor) {
+        if (value >= 90) return "#e28169"
+        if (value >= 70) return "#e0ae63"
+        return normalColor
     }
 
     property color accent: Plasmoid.configuration.accentColor
-    property color bracketColor: Qt.rgba(accent.r, accent.g, accent.b, 0.55)
+    property color bracketColor: Qt.rgba(accent.r, accent.g, accent.b, 0.8)
 
     fullRepresentation: Item {
         id: hud
@@ -228,23 +257,23 @@ PlasmoidItem {
                 anchors.left: isRight ? undefined : parent.left
                 anchors.right: isRight ? parent.right : undefined
                 anchors.margins: 6
-                width: 16
-                height: 16
+                width: 26
+                height: 26
 
                 SequentialAnimation on opacity {
                     loops: Animation.Infinite
-                    NumberAnimation { from: 1; to: 0.35; duration: 1600; easing.type: Easing.InOutSine }
-                    NumberAnimation { from: 0.35; to: 1; duration: 1600; easing.type: Easing.InOutSine }
+                    NumberAnimation { from: 1; to: 0.5; duration: 1600; easing.type: Easing.InOutSine }
+                    NumberAnimation { from: 0.5; to: 1; duration: 1600; easing.type: Easing.InOutSine }
                 }
 
                 Rectangle {
-                    width: parent.width; height: 2
+                    width: parent.width; height: 3
                     color: root.bracketColor
                     anchors.top: parent.isBottom ? undefined : parent.top
                     anchors.bottom: parent.isBottom ? parent.bottom : undefined
                 }
                 Rectangle {
-                    width: 2; height: parent.height
+                    width: 3; height: parent.height
                     color: root.bracketColor
                     anchors.left: parent.isRight ? undefined : parent.left
                     anchors.right: parent.isRight ? parent.right : undefined
@@ -256,12 +285,12 @@ PlasmoidItem {
         Rectangle {
             id: scanline
             width: parent.width
-            height: 46
+            height: 64
             visible: Plasmoid.configuration.showEffects
             gradient: Gradient {
                 orientation: Gradient.Vertical
                 GradientStop { position: 0.0; color: Qt.rgba(0.42, 0.75, 0.95, 0) }
-                GradientStop { position: 0.5; color: Qt.rgba(0.42, 0.75, 0.95, 0.10) }
+                GradientStop { position: 0.5; color: Qt.rgba(0.42, 0.75, 0.95, 0.22) }
                 GradientStop { position: 1.0; color: Qt.rgba(0.42, 0.75, 0.95, 0) }
             }
             y: -height
@@ -278,7 +307,10 @@ PlasmoidItem {
             spacing: 20
 
             ColumnLayout {
-                Layout.fillWidth: true
+                // NOT fillWidth: this column should size to its own content (the wider
+                // of the two ring rows), not stretch to fill whatever's left after
+                // STORAGE - that elastic stretch was the actual root cause of every
+                // "extra gap" in this whole exercise, not a bad width number.
                 Layout.fillHeight: true
                 spacing: 10
 
@@ -323,7 +355,7 @@ PlasmoidItem {
 
             RowLayout {
                 Layout.fillWidth: true
-                spacing: 8
+                spacing: 6
 
                 Repeater {
                     model: Plasmoid.configuration.coreCount
@@ -336,7 +368,10 @@ PlasmoidItem {
                         valueFontSize: 11
                         labelFontSize: 8
                         showDetail: false
-                        implicitWidth: 84
+                        // 76 solves 6*76+5*6 = 486 to match the stat row's 5*92+4*6 = 484
+                        // below, so the two rows begin AND end at (nearly) the same x -
+                        // that's the "alignment" fix, not just a smaller box.
+                        implicitWidth: 76
                         implicitHeight: 76
 
                         Sensors.Sensor { id: coreSensor; sensorId: "cpu/cpu" + index + "/usage" }
@@ -348,31 +383,69 @@ PlasmoidItem {
             RowLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                spacing: 10
+                spacing: 6
+
+                // Ring shrunk from the original 128/100 default so this row's total width
+                // sits closer to the 6-core row above - still clearly bigger than the core
+                // rings (82 vs 56), just not by as wide a margin. Box width is sized off the
+                // compact detail-text width (see compactBytes above), not the ring itself -
+                // that's what actually lets it shrink without eliding.
+                readonly property int statRingSize: 82
+                // 92 = longest compact detail string ("428.9M / 512.0M" ~ 72px) + padding.
+                // 5*92 + 4*6 = 484, matched against the core row's 486 above for alignment.
+                readonly property int statBoxWidth: 92
+                readonly property int statBoxHeight: 116
 
                 ArcGauge {
-                    label: "RAM"; value: ramSensor.value || 0; ringColor: "#75aeda"
+                    label: "RAM"; value: ramSensor.value || 0
+                    ringColor: root.severityColor(ramSensor.value || 0, "#75aeda")
                     detail: shortValue(ramUsed) + " / " + shortValue(ramTotal)
+                    ringSize: parent.statRingSize; thickness: 4
+                    valueFontSize: 12; labelFontSize: 8
+                    implicitWidth: parent.statBoxWidth; implicitHeight: parent.statBoxHeight
+                }
+                // Placeholder split of SWAP into ZRAM vs disk-backed swap, just to preview
+                // the 5-ring layout. Not wired to real per-device data yet — ksysguard's
+                // memory/swap/* sensors only expose the combined total, so a real split
+                // would need its own data source (e.g. parsing `swapon --show`).
+                ArcGauge {
+                    label: "ZRAM"; value: 51
+                    ringColor: root.severityColor(51, "#a68cf0")
+                    detail: "4.1G / 8.0G"
+                    ringSize: parent.statRingSize; thickness: 4
+                    valueFontSize: 12; labelFontSize: 8
+                    implicitWidth: parent.statBoxWidth; implicitHeight: parent.statBoxHeight
                 }
                 ArcGauge {
-                    label: "SWAP"; value: swapSensor.value || 0; ringColor: "#8ea3c0"
-                    detail: shortValue(swapUsed) + " / " + shortValue(swapTotal)
+                    label: "SWAP"; value: 11
+                    ringColor: root.severityColor(11, "#4ecfa0")
+                    detail: "1.7G / 16.0G"
+                    ringSize: parent.statRingSize; thickness: 4
+                    valueFontSize: 12; labelFontSize: 8
+                    implicitWidth: parent.statBoxWidth; implicitHeight: parent.statBoxHeight
                 }
                 ArcGauge {
-                    label: "DISK"; value: diskSensor.value || 0; ringColor: "#5e96c7"
+                    label: "DISK"; value: diskSensor.value || 0
+                    ringColor: root.severityColor(diskSensor.value || 0, "#5e96c7")
                     detail: shortValue(diskUsed) + " / " + shortValue(diskTotal)
+                    ringSize: parent.statRingSize; thickness: 4
+                    valueFontSize: 12; labelFontSize: 8
+                    implicitWidth: parent.statBoxWidth; implicitHeight: parent.statBoxHeight
                 }
                 ArcGauge {
                     visible: Plasmoid.configuration.showGpu
                     label: "GPU"; value: gpuSensor.value || 0; ringColor: "#4bbed6"
                     detail: shortValue(gpuVramUsed) + " / " + shortValue(gpuVramTotal)
+                    ringSize: parent.statRingSize; thickness: 4
+                    valueFontSize: 12; labelFontSize: 8
+                    implicitWidth: parent.statBoxWidth; implicitHeight: parent.statBoxHeight
                 }
             }
 
             Rectangle {
                 Layout.fillWidth: true
-                height: 1
-                color: Qt.rgba(1, 1, 1, 0.1)
+                height: 2
+                color: root.bracketColor
                 visible: Plasmoid.configuration.showNetwork
             }
 
@@ -421,6 +494,7 @@ PlasmoidItem {
             ColumnLayout {
                 Layout.alignment: Qt.AlignVCenter
                 Layout.preferredWidth: 170
+                Layout.minimumWidth: 170
                 spacing: 14
 
                 Text {
@@ -500,7 +574,8 @@ PlasmoidItem {
                         visible: volume.live && volume.mounted
                                  && (volTotal.value || 0) >= Plasmoid.configuration.minDiskSizeGiB * 1073741824
                         label: String(volName.value || volume.modelData.name).toUpperCase()
-                        barColor: barPalette[volume.index % barPalette.length]
+                        barColor: root.severityColor(volPercent.value || 0,
+                                                     barPalette[volume.index % barPalette.length])
                         percent: volPercent.value || 0
                         detail: shortValue(volUsed) + " / " + shortValue(volTotal)
                     }
