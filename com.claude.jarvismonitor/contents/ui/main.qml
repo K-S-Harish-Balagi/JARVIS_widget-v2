@@ -33,9 +33,15 @@ PlasmoidItem {
     Sensors.Sensor { id: swapSensor; sensorId: "memory/swap/usedPercent" }
     Sensors.Sensor { id: swapUsed; sensorId: "memory/swap/used" }
     Sensors.Sensor { id: swapTotal; sensorId: "memory/swap/total" }
-    Sensors.Sensor { id: diskSensor; sensorId: "disk/all/usedPercent" }
-    Sensors.Sensor { id: diskUsed; sensorId: "disk/all/used" }
-    Sensors.Sensor { id: diskTotal; sensorId: "disk/all/total" }
+    // The DISK gauge deliberately does NOT use ksystemstats' "disk/all", which
+    // sums every mounted filesystem — removable media included — and so reads
+    // high when a card or USB drive is plugged in. These are totalled from the
+    // internal (non-removable) volumes only, in the mount probe below.
+    property real internalUsedBytes: 0
+    property real internalTotalBytes: 0
+    readonly property real internalUsedPercent: internalTotalBytes > 0
+                                                ? internalUsedBytes / internalTotalBytes * 100
+                                                : 0
 
     Sensors.Sensor { id: gpuSensor; sensorId: "gpu/all/usage" }
     Sensors.Sensor { id: gpuVramUsed; sensorId: "gpu/all/usedVram" }
@@ -76,9 +82,9 @@ PlasmoidItem {
     // Cleanly ejecting a drive makes ksystemstats drop its sensor, but pulling
     // one out while still mounted does not: the sensor lingers and keeps serving
     // its last reading, so re-subscribing still reports Ready and the bar would
-    // never disappear. The kernel's own mount table is the only reliable answer,
-    // so cross-check every volume against it. Lowercased because sensor ids are
-    // lowercase while findmnt prints NTFS/FAT UUIDs in caps.
+    // never disappear. The kernel's own block-device table is the only reliable
+    // answer, so cross-check every volume against it. Lowercased because sensor
+    // ids are lowercase while lsblk prints NTFS/FAT UUIDs in caps.
     property var mountedUuids: []
 
     P5Support.DataSource {
@@ -88,18 +94,47 @@ PlasmoidItem {
 
         onNewData: function(source, data) {
             disconnectSource(source)
-            const lines = String(data["stdout"] || "").split("\n")
+
             let seen = []
+            let internal = ({})
+            const lines = String(data["stdout"] || "").split("\n")
+
             for (const line of lines) {
-                const uuid = line.trim().toLowerCase()
-                if (uuid.length > 0) seen.push(uuid)
+                // -P prints KEY="value" pairs, which stay unambiguous when a
+                // field is empty; the plain column output does not.
+                let field = ({})
+                const pair = /([A-Z]+)="([^"]*)"/g
+                let match
+                while ((match = pair.exec(line)) !== null) field[match[1]] = match[2]
+
+                const uuid = String(field["UUID"] || "").toLowerCase()
+                const mountPoint = String(field["MOUNTPOINT"] || "")
+                if (!uuid || !mountPoint || mountPoint === "[SWAP]") continue
+                seen.push(uuid)
+
+                // RM=1 marks removable media. Keyed by UUID so a filesystem
+                // mounted twice (/ and /home share one here) is counted once.
+                if (field["RM"] !== "0" || !field["FSSIZE"]) continue
+                internal[uuid] = { total: Number(field["FSSIZE"]),
+                                   used: Number(field["FSUSED"] || 0) }
             }
+
+            let totalBytes = 0
+            let usedBytes = 0
+            for (const uuid in internal) {
+                totalBytes += internal[uuid].total
+                usedBytes += internal[uuid].used
+            }
+
             root.mountedUuids = seen
+            root.internalTotalBytes = totalBytes
+            root.internalUsedBytes = usedBytes
         }
 
         function refresh() {
             // Skip if the previous run hasn't reported back yet.
-            if (connectedSources.length === 0) connectSource("findmnt -rno UUID")
+            if (connectedSources.length === 0)
+                connectSource("lsblk -Pnb -o UUID,RM,FSSIZE,FSUSED,MOUNTPOINT")
         }
     }
 
@@ -425,9 +460,12 @@ PlasmoidItem {
                     implicitWidth: parent.statBoxWidth; implicitHeight: parent.statBoxHeight
                 }
                 ArcGauge {
-                    label: "DISK"; value: diskSensor.value || 0
-                    ringColor: root.severityColor(diskSensor.value || 0, "#5e96c7")
-                    detail: shortValue(diskUsed) + " / " + shortValue(diskTotal)
+                    label: "DISK"; value: root.internalUsedPercent
+                    ringColor: root.severityColor(root.internalUsedPercent, "#5e96c7")
+                    detail: root.internalTotalBytes > 0
+                            ? root.compactBytes(root.internalUsedBytes) + " / "
+                              + root.compactBytes(root.internalTotalBytes)
+                            : "—"
                     ringSize: parent.statRingSize; thickness: 4
                     valueFontSize: 12; labelFontSize: 8
                     implicitWidth: parent.statBoxWidth; implicitHeight: parent.statBoxHeight
