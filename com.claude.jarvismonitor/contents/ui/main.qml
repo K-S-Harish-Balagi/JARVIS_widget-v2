@@ -43,9 +43,19 @@ PlasmoidItem {
                                                 ? internalUsedBytes / internalTotalBytes * 100
                                                 : 0
 
+    // ZRAM vs disk-backed swap. ksystemstats' memory/swap/* sensors only give the
+    // combined total, so these come from /proc/swaps in the swap probe below.
+    property real zramUsedBytes: 0
+    property real zramTotalBytes: 0
+    property real diskSwapUsedBytes: 0
+    property real diskSwapTotalBytes: 0
+    readonly property real zramUsedPercent: zramTotalBytes > 0 ? zramUsedBytes / zramTotalBytes * 100 : 0
+    readonly property real diskSwapUsedPercent: diskSwapTotalBytes > 0 ? diskSwapUsedBytes / diskSwapTotalBytes * 100 : 0
+
     Sensors.Sensor { id: gpuSensor; sensorId: "gpu/all/usage" }
     Sensors.Sensor { id: gpuVramUsed; sensorId: "gpu/all/usedVram" }
     Sensors.Sensor { id: gpuVramTotal; sensorId: "gpu/all/totalVram" }
+    Sensors.Sensor { id: cpuAllSensor; sensorId: "cpu/all/usage" }
     Sensors.Sensor { id: netDownSensor; sensorId: "network/all/download" }
     Sensors.Sensor { id: netUpSensor; sensorId: "network/all/upload" }
     Sensors.Sensor { id: batterySensor; sensorId: "power/battery_BAT0/chargePercentage" }
@@ -136,6 +146,84 @@ PlasmoidItem {
             if (connectedSources.length === 0)
                 connectSource("lsblk -Pnb -o UUID,RM,FSSIZE,FSUSED,MOUNTPOINT")
         }
+    }
+
+    // /proc/swaps lists every swap area with its size and use in KiB:
+    //   Filename  Type  Size  Used  Priority
+    // /dev/zram* are compressed RAM; everything else (here /swapfile) is on disk.
+    // The executable engine runs no shell, so this is a plain `cat`.
+    P5Support.DataSource {
+        id: swapProbe
+        engine: "executable"
+        connectedSources: []
+
+        onNewData: function(source, data) {
+            disconnectSource(source)
+            let zUsed = 0, zTotal = 0, dUsed = 0, dTotal = 0
+            const lines = String(data["stdout"] || "").split("\n").slice(1)
+            for (const line of lines) {
+                const f = line.trim().split(/\s+/)
+                if (f.length < 4) continue
+                const size = Number(f[2]) * 1024, used = Number(f[3]) * 1024
+                if (!isFinite(size) || !isFinite(used)) continue
+                if (f[0].startsWith("/dev/zram")) { zTotal += size; zUsed += used }
+                else { dTotal += size; dUsed += used }
+            }
+            root.zramUsedBytes = zUsed
+            root.zramTotalBytes = zTotal
+            root.diskSwapUsedBytes = dUsed
+            root.diskSwapTotalBytes = dTotal
+        }
+
+        function refresh() {
+            if (connectedSources.length === 0)
+                connectSource("cat /proc/swaps")
+        }
+    }
+
+    Timer {
+        interval: 5000
+        repeat: true
+        running: true
+        triggeredOnStart: true
+        onTriggered: swapProbe.refresh()
+    }
+
+    // the header's "fedora - up 2 d 22 h": no sensor gives it, so read the two files
+    property string hostName: ""
+    property string upText: ""
+
+    P5Support.DataSource {
+        id: sysProbe
+        engine: "executable"
+        connectedSources: []
+
+        onNewData: function(source, data) {
+            disconnectSource(source)
+            const out = String(data["stdout"] || "").split("\n")
+            root.hostName = (out[0] || "").trim()
+            const secs = Number((out[1] || "0").trim().split(" ")[0])
+            if (isFinite(secs) && secs > 0) {
+                const d = Math.floor(secs / 86400)
+                const h = Math.floor((secs % 86400) / 3600)
+                const m = Math.floor((secs % 3600) / 60)
+                root.upText = d > 0 ? "up " + d + " d " + h + " h"
+                                    : (h > 0 ? "up " + h + " h " + m + " m" : "up " + m + " m")
+            }
+        }
+
+        function refresh() {
+            if (connectedSources.length === 0)
+                connectSource("sh -c 'hostname; cat /proc/uptime'")
+        }
+    }
+
+    Timer {
+        interval: 60000
+        repeat: true
+        running: true
+        triggeredOnStart: true
+        onTriggered: sysProbe.refresh()
     }
 
     Sensors.SensorTreeModel { id: sensorTree }
@@ -238,6 +326,40 @@ PlasmoidItem {
     property color accent: Plasmoid.configuration.accentColor
     property color bracketColor: Qt.rgba(accent.r, accent.g, accent.b, 0.8)
 
+
+    // Catppuccin Mocha, exactly the card on page 5 of the Build Set canvas
+    readonly property color cText: "#cdd6f4"
+    readonly property color cSub: "#a6adc8"
+    readonly property color cFaint: "#7f849c"
+    readonly property color cCard: "#1e1e2e"
+    readonly property color cPanel: Qt.rgba(49 / 255, 50 / 255, 68 / 255, 0.55)
+    readonly property color cLine: Qt.rgba(205 / 255, 214 / 255, 244 / 255, 0.08)
+    readonly property color cGreen: "#a6e3a1"
+
+    component Panel: Rectangle {
+        default property alias content: inner.data
+        property alias spacing: inner.spacing
+        color: root.cPanel
+        radius: 12
+        implicitHeight: inner.implicitHeight + 26
+        implicitWidth: inner.implicitWidth + 28
+
+        ColumnLayout {
+            id: inner
+            anchors.fill: parent
+            anchors.margins: 14
+            spacing: 10
+        }
+    }
+
+    component PanelTitle: Text {
+        color: root.cSub
+        font.family: "Inter"
+        font.pixelSize: 11
+        font.letterSpacing: 0.8
+        font.weight: Font.Medium
+    }
+
     fullRepresentation: Item {
         id: hud
         implicitWidth: root.hudMinWidth
@@ -249,129 +371,109 @@ PlasmoidItem {
 
         Rectangle {
             anchors.fill: parent
-            radius: 10
-            color: Qt.rgba(0.055, 0.086, 0.125, 0.6)
-            border.color: Qt.rgba(0.29, 0.66, 0.85, 0.28)
+            radius: 16
+            color: Qt.rgba(30 / 255, 30 / 255, 46 / 255, 0.94)
+            border.color: root.cLine
             border.width: 1
         }
 
-        // holographic grid backdrop
-        Canvas {
-            id: hudGrid
+        ColumnLayout {
             anchors.fill: parent
-            visible: Plasmoid.configuration.showEffects
-            onPaint: {
-                var ctx = getContext("2d")
-                ctx.reset()
-                ctx.strokeStyle = "rgba(75,169,222,0.06)"
-                ctx.lineWidth = 1
-                var step = 26
-                for (var x = step; x < width; x += step) {
-                    ctx.beginPath()
-                    ctx.moveTo(x + 0.5, 0)
-                    ctx.lineTo(x + 0.5, height)
-                    ctx.stroke()
-                }
-                for (var y = step; y < height; y += step) {
-                    ctx.beginPath()
-                    ctx.moveTo(0, y + 0.5)
-                    ctx.lineTo(width, y + 0.5)
-                    ctx.stroke()
-                }
-            }
-        }
+            anchors.margins: 16
+            spacing: 12
 
-        // corner brackets
-        Repeater {
-            model: Plasmoid.configuration.showEffects ? 4 : 0
-            Item {
-                readonly property bool isRight: index === 1 || index === 3
-                readonly property bool isBottom: index === 2 || index === 3
-                anchors.top: isBottom ? undefined : parent.top
-                anchors.bottom: isBottom ? parent.bottom : undefined
-                anchors.left: isRight ? undefined : parent.left
-                anchors.right: isRight ? parent.right : undefined
-                anchors.margins: 6
-                width: 26
-                height: 26
-
-                SequentialAnimation on opacity {
-                    loops: Animation.Infinite
-                    NumberAnimation { from: 1; to: 0.5; duration: 1600; easing.type: Easing.InOutSine }
-                    NumberAnimation { from: 0.5; to: 1; duration: 1600; easing.type: Easing.InOutSine }
-                }
-
-                Rectangle {
-                    width: parent.width; height: 3
-                    color: root.bracketColor
-                    anchors.top: parent.isBottom ? undefined : parent.top
-                    anchors.bottom: parent.isBottom ? parent.bottom : undefined
-                }
-                Rectangle {
-                    width: 3; height: parent.height
-                    color: root.bracketColor
-                    anchors.left: parent.isRight ? undefined : parent.left
-                    anchors.right: parent.isRight ? parent.right : undefined
-                }
-            }
-        }
-
-        // sweeping scan line
-        Rectangle {
-            id: scanline
-            width: parent.width
-            height: 64
-            visible: Plasmoid.configuration.showEffects
-            gradient: Gradient {
-                orientation: Gradient.Vertical
-                GradientStop { position: 0.0; color: Qt.rgba(0.42, 0.75, 0.95, 0) }
-                GradientStop { position: 0.5; color: Qt.rgba(0.42, 0.75, 0.95, 0.22) }
-                GradientStop { position: 1.0; color: Qt.rgba(0.42, 0.75, 0.95, 0) }
-            }
-            y: -height
-            SequentialAnimation on y {
-                loops: Animation.Infinite
-                NumberAnimation { from: -scanline.height; to: hud.height; duration: 5200; easing.type: Easing.InOutSine }
-                PauseAnimation { duration: 1400 }
-            }
-        }
-
-        RowLayout {
-            anchors.fill: parent
-            anchors.margins: 18
-            spacing: 20
-
-            ColumnLayout {
-                // NOT fillWidth: this column should size to its own content (the wider
-                // of the two ring rows), not stretch to fill whatever's left after
-                // STORAGE - that elastic stretch was the actual root cause of every
-                // "extra gap" in this whole exercise, not a bad width number.
-                Layout.fillHeight: true
-                spacing: 10
-
+            // ---- header ------------------------------------------------------
             RowLayout {
                 Layout.fillWidth: true
-                Text {
-                    text: "SYSTEM MONITOR"
-                    color: root.accent
-                    font.family: "JetBrains Mono"
-                    font.pixelSize: 11
-                    font.bold: true
-                    font.letterSpacing: 3
-                }
-                Item { Layout.fillWidth: true }
-                BatteryIndicator {
-                    visible: Plasmoid.configuration.showBattery
-                    percent: batterySensor.value || 0
-                    charging: (batteryChargeRateSensor.value || 0) > 0
-                    Layout.alignment: Qt.AlignVCenter
-                    Layout.rightMargin: 14
-                }
-                Rectangle {
-                    width: 6; height: 6; radius: 3
-                    color: "#5fbe8b"
-                    Layout.alignment: Qt.AlignVCenter
+                spacing: 8
 
+                Canvas {
+                    Layout.preferredWidth: 18
+                    Layout.preferredHeight: 18
+                    Layout.alignment: Qt.AlignVCenter
+                    onPaint: {
+                        const c = getContext("2d")
+                        c.reset()
+                        c.strokeStyle = root.accent
+                        c.lineWidth = 1.8
+                        c.lineJoin = "round"
+                        c.beginPath()
+                        c.moveTo(1, 11)
+                        c.lineTo(5, 11)
+                        c.lineTo(7, 4)
+                        c.lineTo(10, 15)
+                        c.lineTo(12.5, 9)
+                        c.lineTo(17, 9)
+                        c.stroke()
+                    }
+                }
+                Text {
+                    text: i18n("System monitor")
+                    color: root.cText
+                    font.family: "Inter"
+                    font.pixelSize: 14
+                    font.weight: Font.DemiBold
+                }
+                Text {
+                    text: root.hostName + (root.upText.length > 0 ? " · " + root.upText : "")
+                    color: root.cSub
+                    font.family: "Inter"
+                    font.pixelSize: 12
+                }
+
+                Item { Layout.fillWidth: true }
+
+                // battery pill
+                Rectangle {
+                    visible: Plasmoid.configuration.showBattery && (batterySensor.value || 0) > 0
+                    Layout.alignment: Qt.AlignVCenter
+                    implicitWidth: batteryRow.implicitWidth + 20
+                    implicitHeight: 24
+                    radius: 12
+                    color: Qt.rgba(166 / 255, 227 / 255, 161 / 255, 0.16)
+
+                    RowLayout {
+                        id: batteryRow
+                        anchors.centerIn: parent
+                        spacing: 6
+
+                        Canvas {
+                            id: batteryIcon
+                            Layout.preferredWidth: 16
+                            Layout.preferredHeight: 12
+                            onPaint: {
+                                const c = getContext("2d")
+                                c.reset()
+                                c.strokeStyle = root.cGreen
+                                c.fillStyle = root.cGreen
+                                c.lineWidth = 1.3
+                                c.strokeRect(0.7, 1.5, 12, 9)
+                                c.fillRect(13.4, 4.5, 2, 3)
+                                const pct = Math.max(0, Math.min(100, batterySensor.value || 0))
+                                c.fillRect(2.2, 3, 9 * pct / 100, 6)
+                            }
+                            Connections {
+                                target: batterySensor
+                                function onValueChanged() { batteryIcon.requestPaint() }
+                            }
+                        }
+                        Text {
+                            text: Math.round(batterySensor.value || 0) + "%"
+                                  + ((batteryChargeRateSensor.value || 0) > 0 ? " · " + i18n("charging") : "")
+                            color: root.cGreen
+                            font.family: "Inter"
+                            font.pixelSize: 12
+                            font.weight: Font.DemiBold
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.preferredWidth: 7
+                    Layout.preferredHeight: 7
+                    radius: 3.5
+                    color: root.cGreen
+                    Layout.alignment: Qt.AlignVCenter
                     SequentialAnimation on opacity {
                         loops: Animation.Infinite
                         NumberAnimation { from: 1; to: 0.3; duration: 900 }
@@ -379,243 +481,239 @@ PlasmoidItem {
                     }
                 }
                 Text {
-                    text: "LIVE"
-                    color: "#93a2ac"
-                    font.family: "JetBrains Mono"
-                    font.pixelSize: 9
-                    font.letterSpacing: 1.5
-                    font.bold: true
+                    text: i18n("Live")
+                    color: root.cSub
+                    font.family: "Inter"
+                    font.pixelSize: 12
                 }
             }
 
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 6
-
-                Repeater {
-                    model: Plasmoid.configuration.coreCount
-                    delegate: ArcGauge {
-                        id: coreGauge
-                        label: "C" + (index + 1)
-                        ringColor: "#43b4e8"
-                        ringSize: 56
-                        thickness: 4
-                        valueFontSize: 11
-                        labelFontSize: 8
-                        showDetail: false
-                        // 76 solves 6*76+5*6 = 486 to match the stat row's 5*92+4*6 = 484
-                        // below, so the two rows begin AND end at (nearly) the same x -
-                        // that's the "alignment" fix, not just a smaller box.
-                        implicitWidth: 76
-                        implicitHeight: 76
-
-                        Sensors.Sensor { id: coreSensor; sensorId: "cpu/cpu" + index + "/usage" }
-                        value: coreSensor.value || 0
-                    }
-                }
-            }
-
+            // ---- body --------------------------------------------------------
             RowLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                spacing: 6
+                spacing: 12
 
-                // Ring shrunk from the original 128/100 default so this row's total width
-                // sits closer to the 6-core row above - still clearly bigger than the core
-                // rings (82 vs 56), just not by as wide a margin. Box width is sized off the
-                // compact detail-text width (see compactBytes above), not the ring itself -
-                // that's what actually lets it shrink without eliding.
-                readonly property int statRingSize: 82
-                // 92 = longest compact detail string ("428.9M / 512.0M" ~ 72px) + padding.
-                // 5*92 + 4*6 = 484, matched against the core row's 486 above for alignment.
-                readonly property int statBoxWidth: 92
-                readonly property int statBoxHeight: 116
+                ColumnLayout {
+                    Layout.fillHeight: true
+                    spacing: 12
 
-                ArcGauge {
-                    label: "RAM"; value: ramSensor.value || 0
-                    ringColor: root.severityColor(ramSensor.value || 0, "#75aeda")
-                    detail: shortValue(ramUsed) + " / " + shortValue(ramTotal)
-                    ringSize: parent.statRingSize; thickness: 4
-                    valueFontSize: 12; labelFontSize: 8
-                    implicitWidth: parent.statBoxWidth; implicitHeight: parent.statBoxHeight
-                }
-                // Placeholder split of SWAP into ZRAM vs disk-backed swap, just to preview
-                // the 5-ring layout. Not wired to real per-device data yet — ksysguard's
-                // memory/swap/* sensors only expose the combined total, so a real split
-                // would need its own data source (e.g. parsing `swapon --show`).
-                ArcGauge {
-                    label: "ZRAM"; value: 51
-                    ringColor: root.severityColor(51, "#a68cf0")
-                    detail: "4.1G / 8.0G"
-                    ringSize: parent.statRingSize; thickness: 4
-                    valueFontSize: 12; labelFontSize: 8
-                    implicitWidth: parent.statBoxWidth; implicitHeight: parent.statBoxHeight
-                }
-                ArcGauge {
-                    label: "SWAP"; value: 11
-                    ringColor: root.severityColor(11, "#4ecfa0")
-                    detail: "1.7G / 16.0G"
-                    ringSize: parent.statRingSize; thickness: 4
-                    valueFontSize: 12; labelFontSize: 8
-                    implicitWidth: parent.statBoxWidth; implicitHeight: parent.statBoxHeight
-                }
-                ArcGauge {
-                    label: "DISK"; value: root.internalUsedPercent
-                    ringColor: root.severityColor(root.internalUsedPercent, "#5e96c7")
-                    detail: root.internalTotalBytes > 0
-                            ? root.compactBytes(root.internalUsedBytes) + " / "
-                              + root.compactBytes(root.internalTotalBytes)
-                            : "—"
-                    ringSize: parent.statRingSize; thickness: 4
-                    valueFontSize: 12; labelFontSize: 8
-                    implicitWidth: parent.statBoxWidth; implicitHeight: parent.statBoxHeight
-                }
-                ArcGauge {
-                    visible: Plasmoid.configuration.showGpu
-                    label: "GPU"; value: gpuSensor.value || 0; ringColor: "#4bbed6"
-                    detail: shortValue(gpuVramUsed) + " / " + shortValue(gpuVramTotal)
-                    ringSize: parent.statRingSize; thickness: 4
-                    valueFontSize: 12; labelFontSize: 8
-                    implicitWidth: parent.statBoxWidth; implicitHeight: parent.statBoxHeight
-                }
-            }
+                    Panel {
+                        Layout.fillWidth: true
 
-            Rectangle {
-                Layout.fillWidth: true
-                height: 2
-                color: root.bracketColor
-                visible: Plasmoid.configuration.showNetwork
-            }
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 6
-                visible: Plasmoid.configuration.showNetwork
-
-                Text {
-                    text: "INTERNET"
-                    color: "#93a2ac"
-                    font.family: "JetBrains Mono"
-                    font.pixelSize: 10
-                    font.letterSpacing: 1.5
-                    font.bold: true
-                }
-
-                Item { Layout.fillWidth: true }
-
-                RowLayout {
-                    spacing: 14
-                    Text {
-                        text: "▼ " + (netDownSensor.formattedValue || "0 B/s")
-                        color: root.accent
-                        font.family: "JetBrains Mono"
-                        font.pixelSize: 11
-                        font.bold: true
-                    }
-                    Text {
-                        text: "▲ " + (netUpSensor.formattedValue || "0 B/s")
-                        color: root.accent
-                        font.family: "JetBrains Mono"
-                        font.pixelSize: 11
-                        font.bold: true
-                    }
-                }
-            }
-            }
-
-            Rectangle {
-                Layout.fillHeight: true
-                width: 1
-                color: Qt.rgba(1, 1, 1, 0.08)
-            }
-
-            ColumnLayout {
-                Layout.alignment: Qt.AlignVCenter
-                Layout.preferredWidth: 170
-                Layout.minimumWidth: 170
-                spacing: 14
-
-                Text {
-                    text: "STORAGE"
-                    color: root.accent
-                    font.family: "JetBrains Mono"
-                    font.pixelSize: 11
-                    font.bold: true
-                    font.letterSpacing: 3
-                }
-
-                Repeater {
-                    model: root.diskList
-
-                    delegate: DiskBar {
-                        id: volume
-                        required property int index
-                        required property var modelData
-
-                        readonly property var barPalette: ["#5e96c7", "#4bbed6", "#75aeda",
-                                                           "#8ea3c0", "#43b4e8"]
-
-                        Sensors.Sensor { id: volPercent; sensorId: volume.modelData.id + "/usedPercent" }
-                        Sensors.Sensor { id: volUsed; sensorId: volume.modelData.id + "/used" }
-                        Sensors.Sensor { id: volTotal; sensorId: volume.modelData.id + "/total" }
-                        // The tree node's display name is still the raw sensor id
-                        // in the instant after a volume mounts, so take the label
-                        // from this sensor, which resolves to the volume label.
-                        Sensors.Sensor { id: volName; sensorId: volume.modelData.id + "/name" }
-
-                        // Re-subscribing is what actually tests whether the volume
-                        // is still mounted: a live one returns to Ready almost at
-                        // once, a dead one stays stuck at Loading.
-                        function resubscribe() {
-                            const base = volume.modelData.id
-                            volPercent.sensorId = ""
-                            volUsed.sensorId = ""
-                            volTotal.sensorId = ""
-                            volName.sensorId = ""
-                            volPercent.sensorId = base + "/usedPercent"
-                            volUsed.sensorId = base + "/used"
-                            volTotal.sensorId = base + "/total"
-                            volName.sensorId = base + "/name"
-                        }
-
-                        Connections {
-                            target: root
-                            function onProbeTickChanged() { volume.resubscribe() }
-                        }
-
-                        // Latch rather than binding straight to status, so the
-                        // brief Loading dip after each re-subscribe doesn't make
-                        // a healthy drive flicker out of the list.
-                        property bool live: false
-                        readonly property bool ready: volPercent.status === Sensors.Sensor.Ready
-                        onReadyChanged: {
-                            if (ready) {
-                                live = true
-                                deadTimer.stop()
-                            } else {
-                                deadTimer.restart()
+                        RowLayout {
+                            Layout.fillWidth: true
+                            PanelTitle { text: i18n("PROCESSOR") }
+                            Item { Layout.fillWidth: true }
+                            Text {
+                                text: Math.round(cpuAllSensor.value || 0) + "% " + i18n("average")
+                                color: root.cText
+                                font.family: "Inter"
+                                font.pixelSize: 12
+                                font.weight: Font.DemiBold
                             }
                         }
-                        Timer {
-                            id: deadTimer
-                            interval: 4000
-                            onTriggered: volume.live = false
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            Repeater {
+                                model: Plasmoid.configuration.coreCount
+                                delegate: ArcGauge {
+                                    required property int index
+                                    label: i18n("Core %1", index + 1)
+                                    ringColor: root.accent
+                                    ringSize: 46
+                                    thickness: 4
+                                    valueFontSize: 12
+                                    labelFontSize: 11
+                                    showDetail: false
+                                    implicitWidth: 66
+
+                                    Sensors.Sensor { id: coreSensor; sensorId: "cpu/cpu" + index + "/usage" }
+                                    value: coreSensor.value || 0
+                                }
+                            }
+                        }
+                    }
+
+                    Panel {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+
+                        PanelTitle { text: i18n("MEMORY, DISK AND GRAPHICS") }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            spacing: 6
+
+                            readonly property int ringSize: 62
+                            readonly property int boxWidth: 84
+
+                            ArcGauge {
+                                label: i18n("RAM"); value: ramSensor.value || 0
+                                ringColor: root.severityColor(ramSensor.value || 0, "#89b4fa")
+                                detail: shortValue(ramUsed) + " / " + shortValue(ramTotal)
+                                ringSize: parent.ringSize; thickness: 4; valueFontSize: 13; detailFontSize: 9
+                                implicitWidth: parent.boxWidth
+                            }
+                            ArcGauge {
+                                label: i18n("ZRAM"); value: root.zramUsedPercent
+                                ringColor: root.severityColor(root.zramUsedPercent, "#fab387")
+                                detail: root.zramTotalBytes > 0
+                                        ? root.compactBytes(root.zramUsedBytes) + " / " + root.compactBytes(root.zramTotalBytes)
+                                        : "—"
+                                ringSize: parent.ringSize; thickness: 4; valueFontSize: 13; detailFontSize: 9
+                                implicitWidth: parent.boxWidth
+                            }
+                            ArcGauge {
+                                label: i18n("Swap file"); value: root.diskSwapUsedPercent
+                                ringColor: root.severityColor(root.diskSwapUsedPercent, "#94e2d5")
+                                detail: root.diskSwapTotalBytes > 0
+                                        ? root.compactBytes(root.diskSwapUsedBytes) + " / " + root.compactBytes(root.diskSwapTotalBytes)
+                                        : "—"
+                                ringSize: parent.ringSize; thickness: 4; valueFontSize: 13; detailFontSize: 9
+                                implicitWidth: parent.boxWidth
+                            }
+                            ArcGauge {
+                                label: i18n("Disks"); value: root.internalUsedPercent
+                                ringColor: root.severityColor(root.internalUsedPercent, "#89b4fa")
+                                detail: root.internalTotalBytes > 0
+                                        ? root.compactBytes(root.internalUsedBytes) + " / "
+                                          + root.compactBytes(root.internalTotalBytes)
+                                        : "—"
+                                ringSize: parent.ringSize; thickness: 4; valueFontSize: 13; detailFontSize: 9
+                                implicitWidth: parent.boxWidth
+                            }
+                            ArcGauge {
+                                visible: Plasmoid.configuration.showGpu
+                                label: i18n("GPU"); value: gpuSensor.value || 0
+                                ringColor: root.severityColor(gpuSensor.value || 0, "#cba6f7")
+                                detail: shortValue(gpuVramUsed) + " / " + shortValue(gpuVramTotal)
+                                ringSize: parent.ringSize; thickness: 4; valueFontSize: 13; detailFontSize: 9
+                                implicitWidth: parent.boxWidth
+                            }
+                        }
+                    }
+                }
+
+                ColumnLayout {
+                    Layout.fillHeight: true
+                    Layout.preferredWidth: 200
+                    Layout.minimumWidth: 200
+                    spacing: 12
+
+                    Panel {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        spacing: 12
+
+                        PanelTitle { text: i18n("STORAGE") }
+
+                        Repeater {
+                            model: root.diskList
+
+                            delegate: DiskBar {
+                                id: volume
+                                required property int index
+                                required property var modelData
+
+                                readonly property var barPalette: ["#89b4fa", "#94e2d5", "#a6e3a1",
+                                                                   "#cba6f7", "#f9e2af"]
+
+                                Sensors.Sensor { id: volPercent; sensorId: volume.modelData.id + "/usedPercent" }
+                                Sensors.Sensor { id: volUsed; sensorId: volume.modelData.id + "/used" }
+                                Sensors.Sensor { id: volTotal; sensorId: volume.modelData.id + "/total" }
+                                // the tree node's display name is still the raw sensor id in the
+                                // instant after a volume mounts, so take the label from this one
+                                Sensors.Sensor { id: volName; sensorId: volume.modelData.id + "/name" }
+
+                                // re-subscribing is what actually tests whether the volume is still
+                                // mounted: a live one returns to Ready at once, a dead one does not
+                                function resubscribe() {
+                                    const base = volume.modelData.id
+                                    volPercent.sensorId = ""
+                                    volUsed.sensorId = ""
+                                    volTotal.sensorId = ""
+                                    volName.sensorId = ""
+                                    volPercent.sensorId = base + "/usedPercent"
+                                    volUsed.sensorId = base + "/used"
+                                    volTotal.sensorId = base + "/total"
+                                    volName.sensorId = base + "/name"
+                                }
+
+                                Connections {
+                                    target: root
+                                    function onProbeTickChanged() { volume.resubscribe() }
+                                }
+
+                                // latch rather than binding straight to status, so the brief Loading
+                                // dip after each re-subscribe does not flicker a healthy drive out
+                                property bool live: false
+                                readonly property bool ready: volPercent.status === Sensors.Sensor.Ready
+                                onReadyChanged: {
+                                    if (ready) {
+                                        live = true
+                                        deadTimer.stop()
+                                    } else {
+                                        deadTimer.restart()
+                                    }
+                                }
+                                Timer {
+                                    id: deadTimer
+                                    interval: 4000
+                                    onTriggered: volume.live = false
+                                }
+
+                                readonly property string uuid: String(volume.modelData.id).replace("disk/", "")
+                                // empty means the first mount probe has not returned yet; don't
+                                // blank the panel out while waiting for it
+                                readonly property bool mounted: root.mountedUuids.length === 0
+                                                                || root.mountedUuids.indexOf(uuid) >= 0
+
+                                Layout.fillWidth: true
+                                visible: volume.live && volume.mounted
+                                         && (volTotal.value || 0) >= Plasmoid.configuration.minDiskSizeGiB * 1073741824
+                                label: String(volName.value || volume.modelData.name)
+                                kind: root.compactBytes(volTotal.value || 0)
+                                barColor: root.severityColor(volPercent.value || 0,
+                                                             barPalette[volume.index % barPalette.length])
+                                percent: volPercent.value || 0
+                                detail: shortValue(volUsed) + " / " + shortValue(volTotal)
+                            }
                         }
 
-                        readonly property string uuid: String(volume.modelData.id).replace("disk/", "")
-                        // Empty means the first mount probe hasn't returned yet;
-                        // don't blank the panel out while waiting for it.
-                        readonly property bool mounted: root.mountedUuids.length === 0
-                                                        || root.mountedUuids.indexOf(uuid) >= 0
+                        Item { Layout.fillHeight: true }
+                    }
 
+                    Panel {
                         Layout.fillWidth: true
-                        visible: volume.live && volume.mounted
-                                 && (volTotal.value || 0) >= Plasmoid.configuration.minDiskSizeGiB * 1073741824
-                        label: String(volName.value || volume.modelData.name).toUpperCase()
-                        barColor: root.severityColor(volPercent.value || 0,
-                                                     barPalette[volume.index % barPalette.length])
-                        percent: volPercent.value || 0
-                        detail: shortValue(volUsed) + " / " + shortValue(volTotal)
+                        visible: Plasmoid.configuration.showNetwork
+
+                        PanelTitle { text: i18n("NETWORK") }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 14
+
+                            Text {
+                                text: "↓ " + (netDownSensor.formattedValue || "0 B/s")
+                                color: root.cText
+                                font.family: "JetBrains Mono"
+                                font.pixelSize: 12
+                                font.weight: Font.DemiBold
+                            }
+                            Text {
+                                text: "↑ " + (netUpSensor.formattedValue || "0 B/s")
+                                color: root.cText
+                                font.family: "JetBrains Mono"
+                                font.pixelSize: 12
+                                font.weight: Font.DemiBold
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
                     }
                 }
             }

@@ -6,7 +6,7 @@
   <kcfgfile name=""/>
   <group name="General">
     <entry name="accentColor" type="Color">
-      <default>#75aeda</default>
+      <default>#cba6f7</default>
     </entry>
     <entry name="coreCount" type="Int">
       <default>6</default>

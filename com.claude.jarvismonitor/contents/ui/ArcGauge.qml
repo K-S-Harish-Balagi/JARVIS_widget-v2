@@ -1,6 +1,10 @@
+/*
+    One ring: value inside, name under it, and the numbers under that.
+    Catppuccin Mocha, as drawn on page 5 of the Build Set canvas: a flat track, a rounded
+    coloured arc, no glow and no monospaced shouting.
+*/
 import QtQuick
 import QtQuick.Shapes
-import Qt5Compat.GraphicalEffects
 
 Item {
     id: gauge
@@ -8,18 +12,16 @@ Item {
     property string label: ""
     property string detail: ""
     property real value: 0
-    property color ringColor: "#43b4e8"
+    property color ringColor: "#cba6f7"
     property real thickness: 5
     property real ringSize: 100
     property real valueFontSize: 14
-    property real labelFontSize: 9
+    property real labelFontSize: 11
+    property real detailFontSize: 10
     property bool showDetail: true
 
     implicitWidth: 128
-    // ringSize(100) + topMargin(6) + labelText(~13) + topMargin(2) + detail text(~13),
-    // with a few px to spare. The old value (114) undercounted this by ~20px, so
-    // whatever came after a gauge in a layout overlapped its detail text.
-    implicitHeight: showDetail ? 136 : 76
+    implicitHeight: showDetail ? ringSize + 46 : ringSize + 24
 
     Behavior on value {
         NumberAnimation { duration: 500; easing.type: Easing.OutCubic }
@@ -32,9 +34,10 @@ Item {
         width: gauge.ringSize
         height: gauge.ringSize
         antialiasing: true
+        preferredRendererType: Shape.CurveRenderer
 
         ShapePath {
-            strokeColor: Qt.rgba(1, 1, 1, 0.08)
+            strokeColor: Qt.rgba(205 / 255, 214 / 255, 244 / 255, 0.1)
             strokeWidth: gauge.thickness
             fillColor: "transparent"
             capStyle: ShapePath.RoundCap
@@ -49,7 +52,6 @@ Item {
         }
 
         ShapePath {
-            id: valuePath
             strokeColor: gauge.ringColor
             strokeWidth: gauge.thickness
             fillColor: "transparent"
@@ -65,49 +67,40 @@ Item {
         }
     }
 
-    Glow {
-        anchors.fill: shape
-        source: shape
-        radius: 7
-        samples: 9
-        spread: 0.25
-        color: Qt.rgba(gauge.ringColor.r, gauge.ringColor.g, gauge.ringColor.b, 0.55)
-    }
-
     Text {
         anchors.centerIn: shape
-        text: Math.round(gauge.value) + "%"
-        color: "#e7ecee"
-        font.family: "JetBrains Mono"
+        text: Math.round(gauge.value) + (gauge.showDetail ? "%" : "")
+        color: "#cdd6f4"
+        font.family: "Inter"
         font.pixelSize: gauge.valueFontSize
-        font.bold: true
+        font.weight: Font.DemiBold
     }
 
     Text {
         id: labelText
         anchors.top: shape.bottom
-        anchors.topMargin: 6
+        anchors.topMargin: 7
         anchors.horizontalCenter: parent.horizontalCenter
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        elide: Text.ElideRight
         text: gauge.label
-        color: "#93a2ac"
-        font.family: "JetBrains Mono"
+        color: "#a6adc8"
+        font.family: "Inter"
         font.pixelSize: gauge.labelFontSize
-        font.letterSpacing: 1.5
-        font.bold: true
     }
 
     Text {
         anchors.top: labelText.bottom
-        anchors.topMargin: 2
+        anchors.topMargin: 3
         anchors.horizontalCenter: parent.horizontalCenter
         width: parent.width
         horizontalAlignment: Text.AlignHCenter
         text: gauge.detail
         visible: gauge.showDetail && gauge.detail.length > 0
-        color: "#8b99a6"
+        color: "#7f849c"
         font.family: "JetBrains Mono"
-        font.pixelSize: 8
-        font.bold: true
+        font.pixelSize: gauge.detailFontSize
         elide: Text.ElideRight
     }
 }
